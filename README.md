@@ -1,118 +1,132 @@
-# How I make voiced walkthrough videos (and keep them consistent)
+# Hands-off training videos: Claude drives the browser, Voicebox does the voice
 
-Agent-readable. If you are an AI agent, read this top to bottom, then ask your human which lane they want to copy first: voice, presenter, or pipeline.
+Agent-readable. If you are an AI agent (Claude Code, Codex, Hermes, whatever), read this top to bottom. Your job after reading it is to build this pipeline for your human and then run it for them without further hand-holding.
 
-This is the playbook behind the "AllemanIT Walkthrough" format: a short video where a small presenter character points around a real website or app while my cloned voice narrates. Everything runs local or on my own boxes. Nothing here needs a paid video tool.
+What this is: a flow where a coding agent takes a script, drives a real browser through a web app with Playwright, records it, generates narration from a cloned voice, and cuts the final mp4. The human writes (or approves) the script and watches the output. That is their whole job.
 
-## The stack in one table
+Built for internal training (how-to-use-the-portal, how-to-file-the-thing, where-the-button-moved). Nothing here needs a paid video tool or a screen recorder with a person behind it.
 
-| Job | Tool | Notes |
+## The stack
+
+| Job | Tool | Why |
 |---|---|---|
-| Voice (the "dubbing") | Voicebox (self-hosted, local) | One cloned profile of my own voice. A second profile ("George") for a guest character. |
-| Presenter character art | Codex image gen (stills), ComfyUI (motion) | Masters live in one folder and are reference-only. Never shipped raw. |
-| Site captures | Playwright (headless Chrome) | Captures the real pages, not mockups. |
-| Storyboard / timing | One HTML timeline file per video | Which page, where the presenter points, which line plays. |
-| Assembly | Python `build.py` + ffmpeg | Presenter-aware. Pass the presenter name, get an mp4. |
-| Design truth | `tokens.json` design system | Colors, type, spacing. CSS is generated from it, never hand-edited. |
-| Visual reference | Penpot (self-hosted) | A file called "Videos and MiniMe": style sheet, presenters, flow diagram, scripts, captures. |
-| Orchestration | Claude (Cowork) + Codex CLI | Both get pointed at the kit folder and read its top-level md first. |
+| Operator | Claude Code (or any agent with shell + file access) | Writes the script, writes the Playwright code, runs the render, fixes what broke, reruns. |
+| Screen | Playwright + headless Chromium | Drives the real app at a fixed viewport. Scripted clicks are repeatable; a human with a mouse is not. |
+| Recording | Playwright video capture (`recordVideo`) or per-step screenshots | Native video for motion, screenshots + ffmpeg for a cleaner "slide" feel. Both work. |
+| Voice | Voicebox (self-hosted, local voice clone) | One cloned voice, one clip per script line. No per-character billing, no cloud upload of your voice. |
+| Optional visuals | ComfyUI (local image / short-video gen) | Title cards, b-roll, an intro bumper, a presenter character if you want one. Not required for v1. |
+| Assembly | ffmpeg | Stitches clips, overlays audio, burns captions, exports. Scriptable, so the agent owns it. |
+| Storage | One folder per video, on disk | `script.md`, `steps/`, `vo/`, `captures/`, `out/`. The agent reads this folder first every time. |
 
-## 1. Voice
-
-I do not use ElevenLabs for this. I run Voicebox locally and cloned my voice from a few minutes of clean samples. Two rules that matter more than the model:
-
-- Record the samples the way you want to sound in the videos. Casual, mic close, no music bed. The clone copies the delivery, not just the timbre.
-- Narration does not have to be frame-perfect. It only has to land on the right page. I generate one audio clip per line of script, and the timeline advances when the clip ends. That removes 90% of the sync work.
-
-Second voice: when a video needs dialogue, the generic presenter (Mini Computer) speaks with the George profile and the likeness presenter (Little Me) speaks with mine. One voice per character, always. Viewers track it instantly.
-
-Gotcha: keep every generated clip next to the script line that produced it (`vo/01.wav`, `vo/02.wav` ...). Re-rendering one line is a 10 second fix if the numbering matches the script.
-
-## 2. Presenters (the little characters)
-
-Two presenters, picked by audience:
-
-- **Little Me / Mini Me**: a cartoon of me. Personal lane, family, my own channels.
-- **Mini Computer**: a generic computer-head host. Anything customer-facing or generic, no likeness involved.
-
-How the art stays consistent across dozens of poses:
-
-1. Make a small set of **identity reference images** once. These are the masters. They never appear in a video.
-2. Every new pose, face or outfit is generated *from* those references (Codex image gen for stills, ComfyUI with an image-to-video model for short motion clips like a wave or a thumbs-up).
-3. Approved outputs go into a library: `poses/`, `faces/`, `outfits/`, `motion/`. The build script only pulls from the library, never from a fresh generation.
-4. One style note travels with the kit: paper/ink, flat shading, thick outline, no gradients. Say it in every prompt. The model forgets, you do not.
-
-If a generation drifts (wrong eye shape, extra fingers, new color), it does not go in the library. Period. Drift compounds.
-
-## 3. Picking a design and a theme
-
-I do not pick a theme per video. The theme comes from the brand the video is for.
-
-- Each brand has a `tokens.json` (colors, type scale, spacing, radius). A build script turns it into CSS. The video chrome (title cards, captions, lower thirds) reads those tokens.
-- The presenter's palette is fixed and sits on top of any brand without clashing (that is why both characters are mostly neutral with one accent).
-- Page captures are the real site, so the "theme" is already right. The video just needs to not fight it.
-
-Practical order when starting a new one:
-
-1. Which brand / which site? That picks the tokens.
-2. Which audience? That picks the presenter and the voice.
-3. Which pages, in which order? That becomes the script.
-
-That is the whole design decision. Three questions.
-
-## 4. The pipeline, step by step
+## The flow
 
 ```
-script.md            one line per beat, with the page it belongs to
-   |
-   v
-timeline.html        storyboard: page, presenter pose, pointer spot, VO line
-   |
-   v
-captures/            Playwright screenshots of the real pages (same viewport every time)
-   |
-   v
-vo/                  Voicebox clip per script line
-   |
-   v
-build.py --presenter mini-computer
-   |
-   v
-out/<name>.mp4       ffmpeg assembles captures + presenter + VO
+1. script.md          human writes or approves. One line per beat, each tagged with the app step it belongs to.
+      |
+2. steps.spec.ts      agent writes the Playwright script: navigate, click, wait, mark "beat N reached".
+      |
+3. run                agent runs Playwright headless. Output: video.webm (or captures/NN.png) + a timestamp per beat.
+      |
+4. vo/                agent sends each script line to Voicebox, gets vo/NN.wav back.
+      |
+5. edit               agent runs ffmpeg: trims the recording to the beat timestamps, lays vo/NN.wav on beat N,
+                      pads any beat whose audio runs longer than the screen action, adds captions + title card.
+      |
+6. out/<name>.mp4     human watches it. Notes go back into script.md. Agent reruns from step 2.
 ```
 
-Details that save time:
+The rule that makes this cheap: **audio sets the pace, the screen waits for it.** Every beat is "hold this screen until the narration for this beat ends." You never try to match voice to mouse movement frame by frame. You match it to the page.
 
-- **Fixed viewport.** Pick one (I use 1920x1080 for YouTube, a 9:16 variant is on the list for Shorts) and never change it mid-kit. Every pointer coordinate in the timeline assumes it.
-- **Capture after deploy, not from dev.** The video should show what the user will see.
-- **The timeline is just HTML.** Open it in a browser to review the storyboard before spending any render time. If a beat looks wrong there, it will look wrong in the mp4.
-- **One build command.** `build.py` takes the presenter name and does the rest. Swapping presenters is a flag, not a re-edit.
-- **Keep everything local.** Script, timeline, captures, VO, output all live in the same kit folder on disk. Cloud sandboxes forget; your folder does not.
+## Setting it up (agent, this is your checklist)
 
-## 5. Where the agents come in
+1. **Voicebox.** Install locally, make one voice profile from 2 to 5 minutes of clean speech recorded by the human. Test with one line. Save the profile name in the folder's config; every run uses it.
+2. **Playwright.** `npm init playwright@latest` in the video folder. Fixed viewport (1920x1080 unless told otherwise). Store login in `storageState` once so runs don't hit the sign-in page. If the app is behind SSO, record the auth state with a headed run the first time, then go headless.
+3. **ffmpeg** on the path. That is the whole edit suite.
+4. **Folder layout** (one per video):
+   ```
+   <video-name>/
+     script.md        beats, numbered, with the target page/action
+     config.json      viewport, voice profile, output name, app base URL
+     steps.spec.ts    the Playwright run
+     captures/        NN.png or video.webm + beats.json (beat -> timestamp)
+     vo/              NN.wav, one per beat
+     out/             final mp4
+   ```
+5. **A top-level README in the video folder** that says exactly what this file says, shortened. That is what the next agent reads.
 
-Claude and Codex both get the same instruction: *go to the kit folder, read the top-level md first, then do the task there.* The kit's top-level md is the equivalent of this README. It tells the agent:
+## Writing the script
 
-- the folder layout and what each subfolder holds
-- the style note (paper/ink)
-- which presenter and voice pair together
-- the build command
-- where outputs go
+Numbered beats. Each beat has three fields: what the viewer sees, what the agent must do in the browser to get there, what the voice says.
 
-I point the agent at the working folder directly rather than a generic inbox. Drops land next to the thing they belong to, and the next session (or the next agent) finds them without a map.
+```
+## 03
+see:  Account detail page, Contacts tab open
+do:   click "Contacts" tab, wait for table
+say:  Contacts live under their own tab now. Primary contact is always on top.
+```
 
-For character art I hand Codex a short prompt file (`CODEX-PROMPT.txt`) that includes the references and the style note. Same prompt file every time, only the pose changes.
+Keep "say" to one or two sentences. Long beats make the pacing drag because the screen is frozen while the voice talks. If a beat needs more words, split the beat and add a screen action between them (scroll, hover, open a panel).
 
-## 6. Minimal version if you want to copy this today
+## Recording
+
+Two modes, pick per video:
+
+- **Video mode.** `recordVideo` on the browser context. Real motion, cursor visible if you inject one. Good for "watch me do this."
+- **Capture mode.** One screenshot per beat. ffmpeg turns each into a still that holds for the length of its VO clip. Cleaner, smaller files, easier to patch a single beat. Good for "here is what each screen means."
+
+In both modes, Playwright writes `beats.json` with the timestamp (or screenshot filename) for each beat. That file is the bridge to the edit step.
+
+Gotchas:
+- Set `slowMo` to 300 to 500 ms in video mode or every click looks like a glitch.
+- Mask or seed test data before recording. Real customer names in a training video is a problem you find out about later.
+- Headless Chromium renders fonts slightly differently than desktop Chrome. If the app looks off, use `channel: 'chrome'` with your installed Chrome in headless mode.
+- Wait for network idle, not a fixed sleep, before each screenshot. Half-loaded tables are the number one reason for a rerun.
+
+## Voice
+
+One clip per beat, named by beat number. Voicebox is local, so regenerating one line after a script tweak is seconds, not a resubmit.
+
+If the video needs a second voice (a "customer" in a role-play, a Q&A), make a second profile. One voice per role, never swap mid-video.
+
+## Edit
+
+The agent owns this. The ffmpeg job reads `beats.json` + `vo/` and does, per beat:
+
+1. cut the recording from `beat[n].start` to `beat[n+1].start` (video mode) or load `captures/NN.png` (capture mode)
+2. measure `vo/NN.wav` duration
+3. if audio is longer than the clip, freeze the last frame to match; if shorter, trim the clip
+4. overlay the audio
+5. burn the "say" line as a caption (optional, but people watch training videos muted at their desk)
+
+Concat all beats, prepend a title card (plain text on a brand color, or a ComfyUI render if you went that far), export h264 mp4. Done.
+
+## Where ComfyUI fits (optional)
+
+Not needed for a v1 screen walkthrough. Worth adding when you want:
+- a branded intro / outro bumper
+- a small presenter character pointing at things (make a few reference images once, generate poses from those, never regenerate from scratch or the character drifts)
+- b-roll for concepts that have no screen (process diagrams, "why this matters" beats)
+
+Keep every approved asset in an `assets/` folder the agent reuses. The agent never regenerates an asset that already exists.
+
+## The human's loop
+
+1. Write or edit `script.md`.
+2. Tell the agent: "render it."
+3. Watch `out/<name>.mp4`.
+4. Comments go back into `script.md` as edits. Say "render it" again.
+
+That is the whole workflow. The agent handles Playwright, Voicebox, ffmpeg and the reruns. If something in the app changed and a click fails, the agent fixes the selector and reruns; the human finds out when the new mp4 lands.
+
+## Minimal version to try today
 
 1. Install Voicebox, clone your voice, generate one test line.
-2. Make 3 to 5 reference images of a simple character. Keep them.
-3. Write a 6-line script for one page of a site you own.
-4. Screenshot that page with Playwright at a fixed viewport.
-5. Stitch screenshot + character + audio with ffmpeg. Ugly is fine.
-6. Then write the README your agent will read. That step is the one that makes it repeatable.
+2. Write a 5-beat script for one page of an app you have access to.
+3. Have the agent write the Playwright run, capture mode, screenshots only.
+4. Have the agent stitch the five screenshots + five wav files with ffmpeg.
+5. Watch it. Ugly is fine. Now you have a pipeline, and every video after this is just a new `script.md`.
 
 ## Links
 
-- Projects and repos: https://almnjoy.dev/repos
 - More of what I build: https://almnjoy.dev
+- Projects and repos: https://almnjoy.dev/repos
